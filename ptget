@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+
+myname=$0
+main_url=$1
+pdfname=$2
+top_pid=$$
+
+yell() { echo "$0: $*" >&2; echo "Please check directory $tmpdir" >&2; }
+die() { yell "$*"; kill -s TERM $top_pid; }
+try() { "$@" || die "cannot $*"; }
+
+usage() {
+	echo "Usage: $myname <url> <output>"
+}
+
+if [[ -z $main_url ]]; then
+	usage
+	exit 0
+fi
+
+tmpdir=`mktemp -d ptgetXXXXX -p /tmp`
+user_agent="Mozilla/5.0 (X11; Linux x86_64; rv:72.0) Gecko/20100101 Firefox/72.0"
+cookie="$tmpdir/cookies"
+
+request_url() {
+	local timeout=3
+	local tries=2
+	try curl --max-time $timeout --silent --url $1 --output $2 --user-agent "$user_agent" --cookie $cookie --cookie-jar $cookie --retry $tries ${@:3}
+}
+
+base_domain() {
+	echo $1 | sed 's/\(.*:\/\/.*\)\/.*/\1/'
+}
+
+get_real_url() {
+	local linkpage="$tmpdir/linkpage"
+	request_url $main_url $linkpage
+	local newurl=`grep "onlinePDF" $linkpage | sed 's/.*href="\([^"]*\)".*/\1/'`
+	local base=`base_domain $main_url`
+	main_url="$base/$newurl"
+}
+
+value_from_mainpage() {
+	grep id=\"$2\" $1 | sed 's/.*value="\([^"]*\).*/\1/'
+}
+
+if [[ $main_url =~ "docinfo.action?" ]]; then
+	get_real_url
+fi
+#echo "URL:" $main_url
+
+mainpage="$tmpdir/mainpage"
+thesis_url=`request_url $main_url $mainpage --location --write-out %{url_effective}`
+title=`value_from_mainpage $mainpage infoname`
+echo "title:" $title
+pagenum=`value_from_mainpage $mainpage pageCount`
+echo "page count:" $pagenum
+fid=`value_from_mainpage $mainpage fid`
+echo "fid:" $fid
+thesis_base=`base_domain $thesis_url`
+
+for i in $(seq 1 $pagenum); do
+	echo -ne "request page $i/$pagenum\r"
+	page_url=`request_url "$thesis_base/jumpServlet?page=$(($i-1))&fid=$fid" - |
+		try python3 -c "import json,sys; print(''.join(map(lambda x: x['src'] if x['id']=='$(($i-1))' else '', json.load(sys.stdin)['list'])))"`
+	page_url="$thesis_base/$page_url"
+	request_url $page_url "$tmpdir/page$i"
+done
+echo -e "\ngenerate pdf"
+
+if [[ -z $pdfname ]]; then
+	pdfname="$title.pdf"
+	echo "save to $pdfname"
+fi
+
+try convert `ls -1v $tmpdir/page*` $pdfname
+
+rm -r $tmpdir
